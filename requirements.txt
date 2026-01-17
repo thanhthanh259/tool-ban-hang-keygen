@@ -1,1 +1,5 @@
 streamlit
+extra-streamlit-components
+pillow
+pillow-heif
+pandas
