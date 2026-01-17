@@ -8,7 +8,7 @@ import pandas as pd
 import time
 
 # --- CẤU HÌNH ---
-VALID_CODES = ["VIP-2026", "ADMIN-888"]
+VALID_CODES = ["AITHANHAI-2026", "ADMIN-888"]
 register_heif_opener()
 st.set_page_config(page_title="EZ-Protect Pro", page_icon="🛡️")
 
@@ -23,6 +23,12 @@ st.markdown("""
     .warning-box { padding: 10px; background-color: #fff3e0; border-left: 5px solid #ff9800; color: #ef6c00; margin-bottom: 10px; }
     </style>
 """, unsafe_allow_html=True)
+
+# --- KHỞI TẠO SESSION STATE (QUAN TRỌNG ĐỂ SỬA LỖI) ---
+if 'processed_buffer' not in st.session_state:
+    st.session_state.processed_buffer = None  # Lưu ảnh đã xử lý để không bị mất
+if 'temp_vip' not in st.session_state:
+    st.session_state.temp_vip = False  # Mở khóa tạm thời ngay lập tức
 
 
 # --- COOKIE MANAGER ---
@@ -93,11 +99,12 @@ def clean_image_data(img):
 def main():
     st.title("🛡️ EZ-Protect")
 
-    # Lấy Cookie
+    # 1. Lấy trạng thái từ Cookie
     trial_status = cookie_manager.get(cookie="ez_trial_status")
-    vip_status = cookie_manager.get(cookie="ez_vip_status")
+    vip_cookie = cookie_manager.get(cookie="ez_vip_status")
 
-    is_vip = (vip_status == "true")
+    # Logic kiểm tra VIP: Ưu tiên Session tạm thời (để mở ngay lập tức) hoặc Cookie (cho lần sau)
+    is_vip = (vip_cookie == "true") or st.session_state.temp_vip
     is_trial_used = (trial_status == "done")
 
     # Header
@@ -105,90 +112,99 @@ def main():
         st.markdown('<span class="vip-badge">👑 VIP MEMBER</span>', unsafe_allow_html=True)
         if st.button("Đăng xuất", key="logout"):
             cookie_manager.delete("ez_vip_status")
+            st.session_state.temp_vip = False
+            st.session_state.processed_buffer = None
             st.rerun()
     elif not is_trial_used:
-        st.markdown('<span class="trial-badge">⚡ DÙNG THỬ MIỄN PHÍ</span>', unsafe_allow_html=True)
+        st.markdown('<span class="trial-badge">⚡ DÙNG THỬ MIỄN PHÍ (1 ẢNH)</span>', unsafe_allow_html=True)
 
     st.divider()
 
-    # Logic chặn
-    if not is_vip and is_trial_used:
+    # Logic chặn: Chỉ chặn khi ĐÃ HẾT THỬ và CHƯA CÓ KẾT QUẢ XỬ LÝ (để cho khách tải xong đã)
+    # Nếu khách đang có ảnh đã xử lý (processed_buffer) thì vẫn cho hiện để tải
+    if not is_vip and is_trial_used and st.session_state.processed_buffer is None:
         show_paywall()
     else:
         show_uploader(is_vip)
 
 
 def show_uploader(is_vip):
-    uploaded_file = st.file_uploader("Upload ảnh (JPG/PNG/HEIC)", type=['jpg', 'png', 'heic'])
+    # Key của file_uploader giúp reset khi cần
+    uploaded_file = st.file_uploader("Upload ảnh (JPG/PNG/HEIC)", type=['jpg', 'png', 'heic'], key="uploader")
 
     if uploaded_file:
+        # Nếu upload ảnh mới -> Xóa kết quả cũ đi
+        # (Cách nhận biết ảnh mới: Streamlit sẽ chạy lại từ đầu)
+        # Tuy nhiên để đơn giản, ta chỉ hiển thị kết quả nếu nó khớp
+
         try:
             image = Image.open(uploaded_file)
             st.image(image, caption="Ảnh gốc", use_container_width=True)
 
-            # Quét ảnh
             data = scan_image(image)
 
             st.divider()
             st.subheader("🔍 PHÂN TÍCH RỦI RO:")
 
-            # --- PHẦN HIỂN THỊ CHI TIẾT ĐỂ "DỌA" KHÁCH ---
-
-            # 1. Hiển thị thông tin máy & ngày giờ
             c1, c2 = st.columns(2)
-
-            # Kiểm tra nếu đọc được tên máy thì hiện cảnh báo
             if data['device'] != "Không xác định":
-                c1.markdown(f"""
-                <div class="warning-box">
-                    <b>📱 LỘ THIẾT BỊ:</b><br>{data['device']}
-                </div>
-                """, unsafe_allow_html=True)
+                c1.markdown(f"""<div class="warning-box"><b>📱 LỘ THIẾT BỊ:</b><br>{data['device']}</div>""",
+                            unsafe_allow_html=True)
             else:
                 c1.info("📱 Thiết bị: Ẩn")
 
             if data['date'] != "Không xác định":
-                c2.markdown(f"""
-                <div class="warning-box">
-                    <b>🕒 LỘ THỜI GIAN:</b><br>{data['date']}
-                </div>
-                """, unsafe_allow_html=True)
+                c2.markdown(f"""<div class="warning-box"><b>🕒 LỘ THỜI GIAN:</b><br>{data['date']}</div>""",
+                            unsafe_allow_html=True)
             else:
                 c2.info("🕒 Thời gian: Ẩn")
 
-            # 2. Hiển thị GPS (Phần quan trọng nhất)
             if data['has_gps']:
-                st.markdown(f"""
-                <div class="danger-box">
-                    <b>🚨 RỦI RO CAO: LỘ VỊ TRÍ NHÀ RIÊNG!</b><br>
-                    Tọa độ: {data['lat']}, {data['lon']}
-                </div>
-                """, unsafe_allow_html=True)
-                # Vẽ bản đồ
+                st.markdown(
+                    f"""<div class="danger-box"><b>🚨 RỦI RO CAO: LỘ VỊ TRÍ!</b><br>Tọa độ: {data['lat']}, {data['lon']}</div>""",
+                    unsafe_allow_html=True)
                 st.map(pd.DataFrame({'lat': [data['lat']], 'lon': [data['lon']]}))
             else:
                 st.success("✅ Vị trí: An toàn (Không tìm thấy GPS)")
 
             st.divider()
 
-            # Nút xử lý
-            if st.button("✨ XÓA SẠCH DẤU VẾT & TẢI VỀ"):
-                clean_buf = clean_image_data(image)
+            # --- KHU VỰC NÚT XỬ LÝ VÀ TẢI VỀ (ĐÃ SỬA LỖI BIẾN MẤT) ---
 
-                st.success("ĐÃ XỬ LÝ XONG! Ảnh của bạn giờ đã an toàn 100%.")
+            # Nếu chưa có kết quả trong bộ nhớ -> Hiện nút Xử lý
+            if st.session_state.processed_buffer is None:
+                if st.button("✨ XÓA SẠCH DẤU VẾT & TẢI VỀ"):
+                    # Xử lý ảnh
+                    clean_buf = clean_image_data(image)
+                    # Lưu vào Session State (Bộ nhớ tạm) -> Để F5 không bị mất
+                    st.session_state.processed_buffer = clean_buf
 
-                # Nút tải
-                st.download_button("⬇️ Tải ảnh sạch", clean_buf, "safe_image.jpg", "image/jpeg")
+                    # Nếu không phải VIP -> Ghi nhận đã dùng thử
+                    if not is_vip:
+                        cookie_manager.set("ez_trial_status", "done", key="set_trial", expires_at=None)
 
-                # Ghi cookie chặn nếu không phải VIP
-                if not is_vip:
-                    cookie_manager.set("ez_trial_status", "done", key="set_trial", expires_at=None)
-                    st.toast("Đã hết lượt dùng thử! Chuyển hướng sau 3s...")
-                    time.sleep(3)
+                    # Rerun để hiển thị nút Tải về từ Session State
                     st.rerun()
 
+            # Nếu ĐÃ CÓ kết quả trong bộ nhớ -> Hiện nút Tải về (Nó sẽ nằm lỳ ở đây)
+            else:
+                st.success("✅ ĐÃ XỬ LÝ XONG! Hãy tải ảnh về.")
+                st.download_button(
+                    label="⬇️ Tải ảnh sạch",
+                    data=st.session_state.processed_buffer,
+                    file_name="safe_image.jpg",
+                    mime="image/jpeg"
+                )
+
+                if not is_vip:
+                    st.info("💡 Bạn đã dùng hết lượt thử. Sau khi tải xong và tải lại trang, hệ thống sẽ khóa.")
+
         except Exception as e:
-            st.error(f"Lỗi: {e}")
+            st.error(f"Lỗi đọc file: {e}")
+    else:
+        # Nếu người dùng xóa ảnh khỏi ô upload -> Xóa luôn bộ nhớ đệm
+        if st.session_state.processed_buffer is not None:
+            st.session_state.processed_buffer = None
 
 
 def show_paywall():
@@ -198,7 +214,7 @@ def show_paywall():
             <p>Bạn đã sử dụng hết lượt miễn phí.</p>
             <p>Để tiếp tục bảo vệ thông tin cá nhân, vui lòng kích hoạt bản quyền.</p>
             <hr>
-            <p>💰 Phí trọn đời: <b>20.000đ</b></p>
+            <p>💰 Phí bản quyền: <b>29.000đ / Sử dụng vĩnh viễn</b></p>
             <p>👉 Zalo Admin: <b>0931.458.778</b></p>
         </div>
     """, unsafe_allow_html=True)
@@ -206,9 +222,12 @@ def show_paywall():
     code = st.text_input("🔑 Nhập Code kích hoạt:", type="password")
     if st.button("MỞ KHÓA NGAY"):
         if code in VALID_CODES:
+            # 1. Ghi Cookie (cho lần sau)
             cookie_manager.set("ez_vip_status", "true", key="set_vip")
-            st.success("Mã đúng! Đang mở khóa...")
-            time.sleep(1)
+            # 2. Ghi Session (để mở NGAY LẬP TỨC không cần chờ cookie)
+            st.session_state.temp_vip = True
+            st.success("Mã đúng! Đang vào hệ thống...")
+            time.sleep(0.5)
             st.rerun()
         else:
             st.error("Mã không đúng!")
